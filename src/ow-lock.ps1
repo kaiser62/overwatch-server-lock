@@ -139,29 +139,56 @@ function Initialize-StateDir {
     $null = icacls $StateDir /inheritance:r /grant:r '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-545:(OI)(CI)RX'
 }
 
-function Read-CachedLists {
-    if (-not (Test-Path $CacheFile)) { return $null }
+# Cache: { "<file name>": { "Sha": "<git blob sha>", "Text": "<contents>" } }.
+# Older caches stored the text directly; those entries get a null Sha and are re-downloaded once.
+function Read-CacheEntries {
+    $entries = @{}
+    if (-not (Test-Path $CacheFile)) { return $entries }
     $obj = Get-Content $CacheFile -Raw | ConvertFrom-Json
+    foreach ($p in $obj.PSObject.Properties) {
+        $entries[$p.Name] = if ($p.Value -is [string]) { @{ Sha = $null; Text = $p.Value } }
+                            else { @{ Sha = $p.Value.Sha; Text = $p.Value.Text } }
+    }
+    $entries
+}
+
+function Read-CachedLists {
+    $entries = Read-CacheEntries
+    if (-not $entries.Count) { return $null }
     $lists = [ordered]@{}
-    foreach ($p in $obj.PSObject.Properties) { $lists[$p.Name] = $p.Value }
+    foreach ($k in ($entries.Keys | Sort-Object)) { $lists[$k] = $entries[$k].Text }
     $lists
 }
 
+# One API call lists the upstream files with their git SHAs; only new or changed files are downloaded.
 function Get-IpLists {
     try {
         # Windows PowerShell emits the JSON array as one object; unroll before filtering.
         $index = Invoke-RestMethod $RepoApi -Headers @{ 'User-Agent' = 'ow-force-server' }
         $files = @($index) | ForEach-Object { $_ } |
             Where-Object { $_.type -eq 'file' -and $_.name -match '^(Ip_ranges_|cfg - ).*\.txt$' }
-        $lists = [ordered]@{}
+        $cache   = Read-CacheEntries
+        $entries = @{}
+        $changed = @()
         foreach ($f in $files) {
-            $lists[$f.name] = (Invoke-WebRequest $f.download_url -UseBasicParsing).Content
+            $hit = $cache[$f.name]
+            if ($hit -and $hit.Sha -eq $f.sha) { $entries[$f.name] = $hit; continue }
+            $entries[$f.name] = @{ Sha = $f.sha; Text = (Invoke-WebRequest $f.download_url -UseBasicParsing).Content }
+            $changed += $f.name
         }
-        if (-not $DryRun) {
-            Initialize-StateDir
-            $lists | ConvertTo-Json | Set-Content $CacheFile -Encoding UTF8
+        $removed = @($cache.Keys | Where-Object { -not $entries.ContainsKey($_) })
+
+        if ($changed.Count -or $removed.Count) {
+            Write-Host "IP lists updated upstream: $($changed.Count) changed, $($removed.Count) removed." -ForegroundColor DarkGray
+            if (-not $DryRun) {
+                Initialize-StateDir
+                $entries | ConvertTo-Json -Depth 3 | Set-Content $CacheFile -Encoding UTF8
+            }
         }
-        Write-Host "Fetched $($lists.Count) IP lists from GitHub." -ForegroundColor DarkGray
+        else { Write-Host "IP lists unchanged upstream ($($entries.Count) cached)." -ForegroundColor DarkGray }
+
+        $lists = [ordered]@{}
+        foreach ($k in ($entries.Keys | Sort-Object)) { $lists[$k] = $entries[$k].Text }
         return $lists
     }
     catch {

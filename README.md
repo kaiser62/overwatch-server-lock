@@ -97,7 +97,7 @@ then check those IPs against the blocked ranges with `-DryRun -Verbose`. Please
 
 ## Caveats
 
-- **Lists go stale.** Blizzard moves and adds servers. Each lock pulls fresh lists; if you start landing on the
+- **Lists go stale.** Blizzard moves and adds servers. Each lock checks upstream (one request) and downloads only lists that changed; if you start landing on the
   wrong region again, the upstream lists need updating.
 - **Longer queues** are possible, since you only match with players on one datacenter.
 - **Groups:** if your party leader is placed on a blocked datacenter you will fail to connect. Unlock first.

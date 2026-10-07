@@ -178,7 +178,7 @@ function Read-State {
 }
 
 function Save-State($keep, $exe, $allowHost, [hashtable]$nets) {
-    [ordered]@{ Keep = $keep; Exe = $exe; AllowHost = @($allowHost); Nets = $nets } |
+    [ordered]@{ Keep = $keep; Exe = $exe; AllowHost = @($allowHost); Nets = $nets; LastCheck = (Get-Date).ToString('o') } |
         ConvertTo-Json -Depth 4 | Set-Content $StateFile -Encoding UTF8
 }
 
@@ -304,7 +304,12 @@ function Show-Status {
     Write-Host "  Program : $app"
     Write-Host "  Rules   : $($rules.Count) ($($out.Count) outbound + inbound mirror)"
     Write-Host "  Blocked : $count IP ranges"
-    if ($task) { Write-Host "  Login IP refresh: every $RefreshMins min" }
+    if ($task) {
+        $state = Read-State
+        $last = if ($state -and $state.LastCheck) { ([datetime]$state.LastCheck).ToString('g') } else { 'never' }
+        Write-Host "  Login IP refresh: every $RefreshMins min, last check $last, $(@($state.Nets.PSObject.Properties).Count) login /24s open"
+    }
+    elseif (-not $isAdmin) { Write-Host '  Login IP refresh: unknown (run as admin to see the SYSTEM task)' }
     else { Write-Host '  Login IP refresh: off' }
     Write-Host '  Verify in match: Ctrl+Shift+N shows server IP.'
 }
@@ -339,6 +344,7 @@ switch ($PSCmdlet.ParameterSetName) {
         foreach ($n in $nets) { $netMap[$n] = $now }
         Save-State $Keep $exe $AllowHost $netMap
         if ($NoAutoRefresh) { Unregister-RefreshTask } else { Register-RefreshTask }
+        Write-RefreshLog "Locked to '$Keep'. Login /24s open: $($nets -join ', ')"
 
         Write-Host "Blocked $($plan.Addresses.Count) ranges from $($plan.BlockNames.Count) lists for:" -ForegroundColor Green
         Write-Host "  $exe"

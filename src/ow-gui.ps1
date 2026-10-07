@@ -21,7 +21,10 @@ if (-not $isAdmin -and -not $Screenshot) {
 Add-Type -AssemblyName System.Windows.Forms, System.Drawing
 Add-Type -Namespace OwLock -Name Dwm -MemberDefinition @'
 [DllImport("dwmapi.dll")] public static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int size);
+[DllImport("shell32.dll", CharSet = CharSet.Unicode)] public static extern int SetCurrentProcessExplicitAppUserModelID(string appId);
 '@
+# Own taskbar identity, otherwise Windows groups the window under powershell.exe and shows its icon.
+[void][OwLock.Dwm]::SetCurrentProcessExplicitAppUserModelID('kaiser62.OverwatchServerLock')
 [Windows.Forms.Application]::EnableVisualStyles()
 
 # --- theme -------------------------------------------------------------------

@@ -6,7 +6,7 @@
 
 <p align="center">
   Force Overwatch 2 matchmaking onto a single datacenter, anywhere in the world (Asia, Americas, Europe,
-  Middle East) using scoped Windows Firewall rules. One small exe, dark UI, one click to lock or unlock.
+  Middle East) using scoped Windows Firewall rules. One small exe, dark UI with live ping, one click to lock or unlock.
 </p>
 
 ---
@@ -34,25 +34,35 @@ so matchmaking can only place you on the region you chose.
 | Americas | NA West, NA Central, NA East, Brazil |
 | Europe / Middle East | Europe (Netherlands, Finland), Middle East (Bahrain, Qatar, KSA) |
 
-Each region keeps every community list whose name matches it (for example NA West keeps
-`Ip_ranges_NA_West.txt` and the `USA West` LAX1/GUW2 lists) and blocks all the others.
+Each region is built from Google Cloud region families (NA West = every `us-west*` region, Europe =
+every `europe-*` region, and so on) plus the Blizzard-owned datacenter blocks for that region. The full
+table is `$Regions` at the top of [`src/ow-lock.ps1`](src/ow-lock.ps1). Google regions that host no
+Overwatch servers (India, Canada, Mexico, Africa, ...) are never blocked.
+
+Each tile shows a live ping to a server in that region (green under 80 ms, amber under 160 ms, red
+above), refreshed every 10 seconds.
 
 ## How it works
 
-1. Uses the Overwatch 2 datacenter IP lists maintained by the community
-   ([foryVERX/Overwatch-Server-Selector](https://github.com/foryVERX/Overwatch-Server-Selector)).
-   They are downloaded once and cached; **Update IP lists** checks upstream and downloads only files that
-   changed (in parallel), then re-applies the lock if it is on.
+1. Most Overwatch 2 servers run on Google Cloud. Their addresses come from Google's own published
+   list ([cloud.json](https://www.gstatic.com/ipranges/cloud.json)), grouped by cloud region, so they are
+   exact and current. Blizzard-owned datacenters (Korea, Taiwan, Sydney, Las Vegas, Chicago, Amsterdam)
+   use fixed ranges. The list is downloaded once and cached; **Update IP lists** re-downloads it only
+   when Google has published a new version (one request), then re-applies the lock if it is on.
 2. Subtracts the ranges of the region you keep, plus the Battle.net login and patch endpoints
    (resolved via DNS at lock time) so sign-in keeps working.
-3. Creates inbound and outbound Windows Firewall block rules, scoped to `Overwatch.exe` only.
-   Other apps that happen to use the same Google Cloud regions are not affected.
+3. Creates inbound and outbound Windows Firewall block rules for IPv4 and IPv6, scoped to
+   `Overwatch.exe` only. Other apps that happen to use the same Google Cloud regions are not affected.
 4. Registers a scheduled task (`OverwatchServerLock-Refresh`, runs as SYSTEM every 2 minutes) that
    re-resolves the Battle.net login hosts. Their IPs rotate; when a new address block shows up, the rules are
    rebuilt from the cached lists so login keeps working. Previously seen login blocks stay open for 7 days.
 
 No game files are touched, nothing is injected, and no drivers are installed. Unlock removes every rule
-and the scheduled task. Settings, cached lists and `refresh.log` live in `%ProgramData%\OverwatchServerLock`
+and the scheduled task.
+
+Tick **Unlock automatically when this window closes** for a temporary lock. Closing the window unlocks;
+if the app is killed or the PC restarts instead, the refresh task sees the window is gone and unlocks
+within 2 minutes. Settings, cached lists and `refresh.log` live in `%ProgramData%\OverwatchServerLock`
 (writable by administrators only, since SYSTEM runs the script from there).
 
 ## Download and use
@@ -61,7 +71,8 @@ and the scheduled task. Settings, cached lists and `refresh.log` live in `%Progr
 2. Close Overwatch.
 3. Double-click the exe and accept the UAC prompt (firewall rules need admin).
    SmartScreen may warn because the exe is unsigned: **More info** then **Run anyway**.
-4. Pick a region and click **Lock**. Use **Update IP lists** now and then to pull newer datacenter lists.
+4. Pick a region (the tiles show your ping to each) and click **Lock**. Use **Update IP lists** now and
+   then to pull Google's latest ranges.
 5. Start Overwatch and queue. In a match, press `Ctrl+Shift+N` to see the server IP and confirm.
 6. Click **Unlock** when you are done, or before grouping with friends who play on other servers.
 
@@ -73,15 +84,18 @@ The exe is a thin launcher around two PowerShell scripts in [`src/`](src). You c
 
 ```powershell
 .\src\ow-lock.ps1 -On                   # lock to Singapore (default)
-.\src\ow-lock.ps1 -On -Keep Japan       # lock to another region (regex on list names)
-.\src\ow-lock.ps1 -On -Keep 'NA_West|USA West'   # NA West; also 'NA_central|USA Central', 'NA_East|USA East', 'Brazil', 'EU'
-.\src\ow-lock.ps1 -Update               # pull newer datacenter lists, re-apply the lock if on
+.\src\ow-lock.ps1 -On -Keep Japan       # lock to another region (regex on region names)
+.\src\ow-lock.ps1 -On -Keep 'NA West|NA Central'   # keep several regions
+.\src\ow-lock.ps1 -On -OwnerPid $PID    # temporary: unlock once this PowerShell exits
+.\src\ow-lock.ps1 -Update               # pull Google's latest ranges, re-apply the lock if on
 .\src\ow-lock.ps1 -On -DryRun -Verbose  # preview the ranges, change nothing
 .\src\ow-lock.ps1 -On -NoAutoRefresh  # lock without the login IP refresh task
 .\src\ow-lock.ps1 -Status
 .\src\ow-lock.ps1 -Off                # remove rules and refresh task
 ```
 
+Regions: `Singapore`, `Japan`, `South Korea`, `Taiwan`, `Australia`, `NA West`, `NA Central`, `NA East`,
+`Brazil`, `Europe`, `Middle East`.
 `-GamePath` overrides auto-detection of `Overwatch.exe` (Steam and Battle.net installs are found automatically).
 
 ## Login broken?
@@ -112,8 +126,10 @@ then check those IPs against the blocked ranges with `-DryRun -Verbose`. Please
 
 ## Caveats
 
-- **Lists go stale.** Blizzard moves and adds servers. Click **Update IP lists** (one request when nothing changed); if you start landing on the
-  wrong region again, the upstream lists need updating.
+- **New datacenters.** Google's list stays current, but if Blizzard opens a datacenter in a Google region
+  that is not mapped yet, or a new Blizzard-owned block, the `$Regions` table needs an update. If you land on
+  the wrong region, please open an issue with the server IP (`Ctrl+Shift+N`).
+- **Ping is approximate.** It is an ICMP ping to one server in the region; in-game latency can differ a little.
 - **Longer queues** are possible, since you only match with players on one datacenter.
 - **Groups:** if your party leader is placed on a blocked datacenter you will fail to connect. Unlock first.
 - **VPNs:** normal full-tunnel VPNs and WireSock-based split tunnels (e.g. TunnlTo) keep the lock working.
@@ -132,7 +148,7 @@ build.cmd
 Output: `dist\OverwatchServerLock.exe`. The icon is generated by [`assets/make-icon.ps1`](assets/make-icon.ps1).
 
 ```
-src/ow-lock.ps1     core: fetch lists, compute ranges, manage firewall rules
+src/ow-lock.ps1     core: region table, fetch Google ranges, compute ranges, manage firewall rules
 src/ow-gui.ps1      WinForms dark UI, runs the core on a background runspace
 src/launcher.cs     exe that unpacks the scripts to %TEMP% and starts the UI
 src/app.manifest    requests admin on launch
@@ -140,7 +156,11 @@ src/app.manifest    requests admin on launch
 
 ## Credits
 
-Datacenter IP lists: [foryVERX/Overwatch-Server-Selector](https://github.com/foryVERX/Overwatch-Server-Selector).
+- Google Cloud IP ranges: [cloud.json](https://www.gstatic.com/ipranges/cloud.json), published by Google.
+- Blizzard datacenter ranges and the region mapping approach:
+  [stowmyy/dropship](https://github.com/stowmyy/dropship), a great server selector with more options.
+- Earlier versions used the community lists from
+  [foryVERX/Overwatch-Server-Selector](https://github.com/foryVERX/Overwatch-Server-Selector).
 
 ## License
 

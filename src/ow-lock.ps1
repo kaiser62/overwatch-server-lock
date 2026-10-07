@@ -3,12 +3,13 @@
   Force Overwatch 2 onto one server region (default: Singapore) by firewall-blocking every other datacenter.
 
 .DESCRIPTION
-  Pulls the community-maintained datacenter IP lists from foryVERX/Overwatch-Server-Selector,
-  subtracts the ranges of the region you keep plus the Battle.net login/patch endpoints, and adds
-  Windows Firewall block rules scoped to Overwatch.exe only (other apps using Google Cloud are untouched).
+  Builds per-region IP lists from Google's published Google Cloud ranges (cloud.json, grouped by cloud
+  region) plus Blizzard-owned datacenter ranges, subtracts the region you keep and the Battle.net
+  login/patch endpoints, and adds Windows Firewall block rules (IPv4 and IPv6) scoped to Overwatch.exe
+  only (other apps using Google Cloud are untouched).
 
-  The lists are cached; -On uses the cache and only downloads when none exists. -Update checks upstream
-  for newer lists (downloading only changed files) and re-applies an active lock.
+  The Google ranges are cached; -On uses the cache and only downloads when none exists. -Update
+  re-downloads them when Google has published a new version and re-applies an active lock.
 
   Battle.net login hosts rotate IPs. -On registers a SYSTEM scheduled task that re-resolves them every
   few minutes (-Refresh) and rebuilds the rules from the cached lists when a new IP block appears.
@@ -20,7 +21,9 @@
   .\ow-lock.ps1 -Status      # show current state
   .\ow-lock.ps1 -On -DryRun  # preview, no changes
   .\ow-lock.ps1 -On -Keep Japan -GamePath 'D:\Games\Overwatch\Overwatch.exe'
+  .\ow-lock.ps1 -On -Keep 'NA West|NA Central'   # keep several regions
   .\ow-lock.ps1 -On -AllowHost 'some.login.host' -NoAutoRefresh
+  .\ow-lock.ps1 -On -OwnerPid 1234   # unlock automatically once process 1234 exits
 #>
 [CmdletBinding(DefaultParameterSetName = 'Status')]
 param(
@@ -31,13 +34,15 @@ param(
     [Parameter(ParameterSetName = 'Refresh', Mandatory)][switch]$Refresh,
     # Check upstream for newer datacenter lists and re-apply the lock if it is on.
     [Parameter(ParameterSetName = 'Update', Mandatory)][switch]$Update,
-    # Regex matched against IP list file names; matching lists are kept reachable.
+    # Regex matched against region names (see $Regions); matching regions are kept reachable.
     [Parameter(ParameterSetName = 'On')][string]$Keep = 'Singapore',
     [Parameter(ParameterSetName = 'On')][string]$GamePath,
     # Extra hostnames (e.g. a regional Battle.net login server) to keep reachable. Comma-separated is fine.
     [Parameter(ParameterSetName = 'On')][string[]]$AllowHost = @(),
     # Do not register the login IP auto-refresh task.
     [Parameter(ParameterSetName = 'On')][switch]$NoAutoRefresh,
+    # Temporary lock: the refresh task unlocks once this process exits (the GUI passes its own PID).
+    [Parameter(ParameterSetName = 'On')][int]$OwnerPid,
     # Show what would be blocked without touching the firewall.
     [Parameter(ParameterSetName = 'On')][switch]$DryRun
 )
@@ -45,14 +50,33 @@ param(
 $ErrorActionPreference = 'Stop'
 $RuleGroup   = 'OW-ForceServer'
 $TaskName    = 'OverwatchServerLock-Refresh'
-$RepoApi     = 'https://api.github.com/repos/foryVERX/Overwatch-Server-Selector/contents/ip_lists'
+$CloudUrl    = 'https://www.gstatic.com/ipranges/cloud.json'
 $StateDir    = Join-Path $env:ProgramData 'OverwatchServerLock'
 $StateFile   = Join-Path $StateDir 'state.json'
-$CacheFile   = Join-Path $StateDir 'ow-ip-cache.json'
+$CacheFile   = Join-Path $StateDir 'gcp-ranges.json'
+$LegacyCache = Join-Path $StateDir 'ow-ip-cache.json'
 $RefreshLog  = Join-Path $StateDir 'refresh.log'
 $ChunkSize   = 500   # remote addresses per firewall rule
 $RefreshMins = 2     # how often the task re-resolves login hosts
 $NetTtlDays  = 7     # keep previously seen login /24s open this long (hosts rotate through pools)
+
+# Overwatch datacenters by region. Gcp is a regex on Google Cloud region names (the "scope" field in
+# cloud.json), so new zones in a family are picked up automatically. Ranges are datacenters outside
+# Google's list: Blizzard-owned blocks, and AWS me-south-1 for Bahrain.
+# Google regions that match no entry (India, Canada, Mexico, Africa, ...) are never blocked.
+$Regions = [ordered]@{
+    'Singapore'   = @{ Gcp = '^asia-southeast';      Ranges = @() }
+    'Japan'       = @{ Gcp = '^asia-northeast[12]$'; Ranges = @() }
+    'South Korea' = @{ Gcp = '^asia-northeast3$';    Ranges = '121.254.0.0/16', '117.52.0.0/16', '202.9.66.0/23', '110.45.208.0/24', '182.162.31.0/24' }
+    'Taiwan'      = @{ Gcp = '^asia-east';           Ranges = '5.42.160.0/22', '5.42.164.0/22' }
+    'Australia'   = @{ Gcp = '^australia-';          Ranges = '158.115.196.0/23', '37.244.42.0/24' }
+    'NA West'     = @{ Gcp = '^us-west';             Ranges = '64.224.24.0/23', '24.105.8.0/21' }
+    'NA Central'  = @{ Gcp = '^us-central';          Ranges = '64.224.0.0/21', '24.105.40.0/21' }
+    'NA East'     = @{ Gcp = '^us-east';             Ranges = @() }
+    'Brazil'      = @{ Gcp = '^southamerica-';       Ranges = @() }
+    'Europe'      = @{ Gcp = '^europe-';             Ranges = '64.224.26.0/23', '5.42.168.0/21' }
+    'Middle East' = @{ Gcp = '^me-';                 Ranges = '157.175.0.0/16', '15.184.0.0/15', '16.24.0.0/16' }
+}
 
 # Battle.net login/patch endpoints live inside the Google Cloud ranges we block
 # (e.g. kr.actual.battle.net sits in the Korea list). Their /24s are always kept reachable.
@@ -112,7 +136,10 @@ function ConvertFrom-IpList([string]$text) {
 function Merge-IpRanges($ranges) {
     $out = New-Object System.Collections.Generic.List[object]
     foreach ($r in ($ranges | Sort-Object { $_[0] })) {
-        $last = if ($out.Count) { $out[$out.Count - 1] } else { $null }
+        # Plain assignment: `$last = if (...) { $out[-1] }` would unroll the pair into a copy,
+        # and extending the copy would silently drop the merged range.
+        $last = $null
+        if ($out.Count) { $last = $out[$out.Count - 1] }
         if ($last -and $r[0] -le $last[1] + 1) {
             if ($r[1] -gt $last[1]) { $last[1] = $r[1] }
         }
@@ -138,6 +165,20 @@ function Remove-IpRanges($block, $keep) {
     , $out
 }
 
+# True when an IPv6 address falls inside an IPv6 CIDR.
+function Test-InPrefix6([string]$addr, [string]$cidr) {
+    $net, $len = $cidr -split '/'
+    $a = [Net.IPAddress]::Parse($addr).GetAddressBytes()
+    $n = [Net.IPAddress]::Parse($net).GetAddressBytes()
+    for ($i = 0; $i -lt 16; $i++) {
+        $bits = [math]::Min(8, [math]::Max(0, [int]$len - 8 * $i))
+        if ($bits -eq 0) { break }
+        $mask = (0xFF -shl (8 - $bits)) -band 0xFF
+        if (($a[$i] -band $mask) -ne ($n[$i] -band $mask)) { return $false }
+    }
+    $true
+}
+
 # --- data --------------------------------------------------------------------
 # State dir holds a copy of this script that SYSTEM runs, so only admins/SYSTEM may write to it.
 # Always re-applied (owner too): a standard user could pre-create this folder under ProgramData.
@@ -149,91 +190,58 @@ function Initialize-StateDir {
     if (Get-ChildItem $StateDir -Force) { $null = icacls (Join-Path $StateDir '*') /reset /T /C }
 }
 
-# Cache: { "<file name>": { "Sha": "<git blob sha>", "Text": "<contents>" } }.
-# Older caches stored the text directly; those entries get a null Sha and are re-downloaded once.
-function Read-CacheEntries {
-    $entries = @{}
-    if (-not (Test-Path $CacheFile)) { return $entries }
-    try { $obj = Get-Content $CacheFile -Raw -ErrorAction Stop | ConvertFrom-Json }
-    catch { Write-Warning "Cannot read $CacheFile ($($_.Exception.Message)); run as administrator."; return $entries }
-    foreach ($p in $obj.PSObject.Properties) {
-        $entries[$p.Name] = if ($p.Value -is [string]) { @{ Sha = $null; Text = $p.Value } }
-                            else { @{ Sha = $p.Value.Sha; Text = $p.Value.Text } }
-    }
-    $entries
+# Cache: { SyncToken, CreationTime, Scopes: { "<google cloud region>": [ "<cidr>", ... ] } }.
+function Read-GcpCache {
+    if (-not (Test-Path $CacheFile)) { return $null }
+    try { Get-Content $CacheFile -Raw -ErrorAction Stop | ConvertFrom-Json }
+    catch { Write-Warning "Cannot read $CacheFile ($($_.Exception.Message)); run as administrator."; $null }
 }
 
-function Read-CachedLists {
-    $entries = Read-CacheEntries
-    if (-not $entries.Count) { return $null }
+# Builds { region name: "cidr`ncidr..." } from the cached Google ranges and the fixed ranges in $Regions.
+function ConvertTo-RegionLists($gcp) {
+    $scopes = @($gcp.Scopes.PSObject.Properties)
     $lists = [ordered]@{}
-    foreach ($k in ($entries.Keys | Sort-Object)) { $lists[$k] = $entries[$k].Text }
+    foreach ($name in $Regions.Keys) {
+        $r = $Regions[$name]
+        $cidrs = @($r.Ranges) + @($scopes | Where-Object { $_.Name -match $r.Gcp } | ForEach-Object { $_.Value })
+        $lists[$name] = $cidrs -join "`n"
+    }
     $lists
 }
 
-function Invoke-ParallelDownload([string[]]$urls) {
-    Add-Type -AssemblyName System.Net.Http
-    # .NET Framework allows 2 connections per host by default, which would serialize the downloads.
-    if ([Net.ServicePointManager]::DefaultConnectionLimit -lt 16) { [Net.ServicePointManager]::DefaultConnectionLimit = 16 }
-    $client = New-Object Net.Http.HttpClient
-    $client.DefaultRequestHeaders.UserAgent.ParseAdd('ow-force-server')
-    try {
-        $tasks = @($urls | ForEach-Object { $client.GetStringAsync($_) })
-        [Threading.Tasks.Task]::WaitAll([Threading.Tasks.Task[]]$tasks)
-        @($tasks | ForEach-Object { $_.Result })
-    }
-    finally { $client.Dispose() }
-}
-
-# Cache first; -Online checks upstream. One API call lists the files with their git SHAs and only new
-# or changed files are downloaded (in parallel).
+# Cache first; -Online downloads cloud.json (one request) and keeps the cache when its syncToken is unchanged.
 function Get-IpLists([switch]$Online) {
-    if (-not $Online) {
-        $cached = Read-CachedLists
-        if ($cached) {
-            Write-Host "Using cached IP lists ($($cached.Count)). Use Update IP lists to check for newer ones." -ForegroundColor DarkGray
-            return $cached
-        }
+    $cache = Read-GcpCache
+    if ($cache -and -not $Online) {
+        Write-Host "Using cached Google Cloud ranges ($($cache.CreationTime)). Use Update IP lists to refresh." -ForegroundColor DarkGray
+        return ConvertTo-RegionLists $cache
     }
     try {
-        # Windows PowerShell emits the JSON array as one object; unroll before filtering.
-        $index = Invoke-RestMethod $RepoApi -Headers @{ 'User-Agent' = 'ow-force-server' }
-        $files = @($index) | ForEach-Object { $_ } |
-            Where-Object { $_.type -eq 'file' -and $_.name -match '^(Ip_ranges_|cfg - ).*\.txt$' }
-        $cache   = Read-CacheEntries
-        $entries = @{}
-        $stale   = @()
-        foreach ($f in $files) {
-            $hit = $cache[$f.name]
-            if ($hit -and $hit.Sha -eq $f.sha) { $entries[$f.name] = $hit } else { $stale += $f }
+        $json = Invoke-RestMethod $CloudUrl -Headers @{ 'User-Agent' = 'ow-server-lock' }
+        if ($cache -and $cache.SyncToken -eq $json.syncToken) {
+            Write-Host "IP lists unchanged upstream (Google Cloud ranges of $($cache.CreationTime))." -ForegroundColor DarkGray
+            return ConvertTo-RegionLists $cache
         }
-        if ($stale.Count) {
-            $texts = Invoke-ParallelDownload @($stale | ForEach-Object { $_.download_url })
-            for ($i = 0; $i -lt $stale.Count; $i++) {
-                $entries[$stale[$i].name] = @{ Sha = $stale[$i].sha; Text = $texts[$i] }
-            }
+        $scopes = [ordered]@{}
+        foreach ($p in $json.prefixes) {
+            $cidr = if ($p.ipv4Prefix) { $p.ipv4Prefix } else { $p.ipv6Prefix }
+            if (-not $scopes.Contains($p.scope)) { $scopes[$p.scope] = New-Object Collections.Generic.List[string] }
+            $scopes[$p.scope].Add($cidr)
         }
-        $changed = @($stale | ForEach-Object { $_.name })
-        $removed = @($cache.Keys | Where-Object { -not $entries.ContainsKey($_) })
-
-        if ($changed.Count -or $removed.Count) {
-            Write-Host "IP lists updated upstream: $($changed.Count) changed, $($removed.Count) removed." -ForegroundColor DarkGray
-            if (-not $DryRun) {
-                Initialize-StateDir
-                $entries | ConvertTo-Json -Depth 3 | Set-Content $CacheFile -Encoding UTF8
-            }
+        $text = [ordered]@{ SyncToken = $json.syncToken; CreationTime = $json.creationTime; Scopes = $scopes } |
+            ConvertTo-Json -Depth 4 -Compress
+        Write-Host "Downloaded Google Cloud ranges of $($json.creationTime) ($(@($json.prefixes).Count) prefixes)." -ForegroundColor DarkGray
+        if (-not $DryRun -and $isAdmin) {
+            Initialize-StateDir
+            Set-Content $CacheFile $text -Encoding UTF8
+            if (Test-Path $LegacyCache) { Remove-Item $LegacyCache }
         }
-        else { Write-Host "IP lists unchanged upstream ($($entries.Count) cached)." -ForegroundColor DarkGray }
-
-        $lists = [ordered]@{}
-        foreach ($k in ($entries.Keys | Sort-Object)) { $lists[$k] = $entries[$k].Text }
-        return $lists
+        return ConvertTo-RegionLists ($text | ConvertFrom-Json)
     }
     catch {
-        $lists = Read-CachedLists
-        if (-not $lists) { throw "Could not fetch IP lists and no cache found: $_" }
-        Write-Warning "GitHub fetch failed ($($_.Exception.Message)); using cached lists from $CacheFile"
-        return $lists
+        if (-not $cache) { throw "Could not download Google Cloud IP ranges and no cache found: $_" }
+        Write-Warning "Download failed ($($_.Exception.Message)); using cached ranges from $CacheFile"
+        return ConvertTo-RegionLists $cache
     }
 }
 
@@ -242,18 +250,21 @@ function Read-State {
     Get-Content $StateFile -Raw | ConvertFrom-Json
 }
 
-function Save-State($keep, $exe, $allowHost, [hashtable]$nets) {
-    [ordered]@{ Keep = $keep; Exe = $exe; AllowHost = @($allowHost); Nets = $nets; LastCheck = (Get-Date).ToString('o') } |
+# Owner: { Pid, Start } of the process whose exit ends a temporary lock, or $null.
+function Save-State($keep, $exe, $allowHost, [hashtable]$nets, $owner) {
+    [ordered]@{ Keep = $keep; Exe = $exe; AllowHost = @($allowHost); Nets = $nets; Owner = $owner; LastCheck = (Get-Date).ToString('o') } |
         ConvertTo-Json -Depth 4 | Set-Content $StateFile -Encoding UTF8
 }
 
-# Resolves login/patch hosts to their /24 network bases (e.g. "34.64.53.0").
+# Resolves login/patch hosts to their /24 network bases (e.g. "34.64.53.0"); IPv6 addresses as-is.
 function Resolve-ServiceNets([string[]]$extraHosts) {
     @(foreach ($h in @($ServiceHosts) + @($extraHosts)) {
         if (-not $h) { continue }
         try {
-            [Net.Dns]::GetHostAddresses($h) | Where-Object AddressFamily -eq 'InterNetwork' |
-                ForEach-Object { $_.IPAddressToString -replace '\.\d+$', '.0' }
+            [Net.Dns]::GetHostAddresses($h) | ForEach-Object {
+                if ($_.AddressFamily -eq 'InterNetwork') { $_.IPAddressToString -replace '\.\d+$', '.0' }
+                elseif (-not $_.IsIPv6LinkLocal) { $_.IPAddressToString }
+            }
         }
         catch { Write-Warning "Could not resolve $h" }
     }) | Sort-Object -Unique
@@ -290,14 +301,20 @@ function Remove-Rules {
     $existing.Count
 }
 
-# Computes the ranges to block: every list not matching $keep, minus kept lists and login /24s.
+# Computes the ranges to block: every region not matching $keep, minus kept regions and login hosts.
+# IPv4 is range-subtracted; IPv6 prefixes are dropped whole when kept or when a login host is inside.
 function Get-BlockPlan($lists, [string]$keep, [string[]]$nets) {
     $keepNames  = @($lists.Keys | Where-Object { $_ -match $keep })
     $blockNames = @($lists.Keys | Where-Object { $_ -notmatch $keep })
     if (-not $keepNames.Count) {
-        throw "No IP list matches -Keep '$keep'. Available: $($lists.Keys -join ', ')"
+        throw "No region matches -Keep '$keep'. Available: $($lists.Keys -join ', ')"
     }
-    $netText    = ($nets | ForEach-Object { "$_/24" }) -join "`n"
+    $nets6  = @($nets | Where-Object { $_ -match ':' })
+    $keep6  = @($keepNames | ForEach-Object { $lists[$_] -split "`n" } | Where-Object { $_ -match ':' })
+    $block6 = @($blockNames | ForEach-Object { $lists[$_] -split "`n" } | Where-Object { $_ -match ':' } |
+        Where-Object { $keep6 -notcontains $_ } | Sort-Object -Unique |
+        Where-Object { $c6 = $_; -not @($nets6 | Where-Object { Test-InPrefix6 $_ $c6 }).Count })
+    $netText    = ($nets | Where-Object { $_ -notmatch ':' } | ForEach-Object { "$_/24" }) -join "`n"
     $keepRanges = Merge-IpRanges @(
         @($keepNames | ForEach-Object { ConvertFrom-IpList $lists[$_] }) +
         @(ConvertFrom-IpList $netText))
@@ -306,14 +323,14 @@ function Get-BlockPlan($lists, [string]$keep, [string[]]$nets) {
     $addresses = @($final | ForEach-Object {
         if ($_[0] -eq $_[1]) { ConvertTo-IpString $_[0] }
         else { '{0}-{1}' -f (ConvertTo-IpString $_[0]), (ConvertTo-IpString $_[1]) }
-    })
+    }) + $block6
     if (-not $addresses.Count) { throw 'Nothing to block after subtracting kept ranges.' }
-    [pscustomobject]@{ Addresses = $addresses; KeepNames = $keepNames; BlockNames = $blockNames }
+    [pscustomobject]@{ Addresses = $addresses; V6Count = $block6.Count; KeepNames = $keepNames; BlockNames = $blockNames }
 }
 
 function Set-Rules($plan, [string]$keep, [string]$exe) {
     [void](Remove-Rules)
-    $desc = "Force Overwatch to '$keep' (kept: $($plan.KeepNames -join '; '))"
+    $desc = "Force Overwatch to '$keep' (kept: $($plan.KeepNames -join ', '))"
     $addresses = $plan.Addresses
     $i = 0
     for ($o = 0; $o -lt $addresses.Count; $o += $ChunkSize) {
@@ -383,6 +400,7 @@ function Show-Status {
         $state = Read-State
         $last = if ($state -and $state.LastCheck) { ([datetime]$state.LastCheck).ToString('g') } else { 'never' }
         Write-Host "  Login IP refresh: every $RefreshMins min, last check $last, $(@($state.Nets.PSObject.Properties).Count) login /24s open"
+        if ($state -and $state.Owner) { Write-Host "  Temporary: unlocks when process $($state.Owner.Pid) exits" }
     }
     elseif (-not $isAdmin) { Write-Host '  Login IP refresh: unknown (run as admin to see the SYSTEM task)' }
     else { Write-Host '  Login IP refresh: off' }
@@ -399,15 +417,20 @@ switch ($PSCmdlet.ParameterSetName) {
     }
     'On' {
         $exe   = Find-Overwatch
+        $owner = $null
+        if ($OwnerPid) {
+            $op = Get-Process -Id $OwnerPid -ErrorAction Stop
+            $owner = [ordered]@{ Pid = $OwnerPid; Start = [string]$op.StartTime.ToUniversalTime().Ticks }
+        }
         $lists = Get-IpLists
         $nets  = @(Resolve-ServiceNets $AllowHost)
         $plan  = Get-BlockPlan $lists $Keep $nets
 
         if ($DryRun) {
-            Write-Host "Dry run: would block $($plan.Addresses.Count) ranges for $exe" -ForegroundColor Cyan
+            Write-Host "Dry run: would block $($plan.Addresses.Count) ranges ($($plan.V6Count) IPv6) for $exe" -ForegroundColor Cyan
             Write-Host "Kept: $($plan.KeepNames -join ', ')"
             Write-Host "Battle.net login/patch /24s kept: $($nets -join ', ')"
-            Write-Host "Blocked lists: $($plan.BlockNames -join ', ')"
+            Write-Host "Blocked regions: $($plan.BlockNames -join ', ')"
             Write-Host "Sample: $($plan.Addresses[0..4] -join ', ')"
             Write-Verbose ($plan.Addresses -join "`n")
             return
@@ -427,15 +450,18 @@ switch ($PSCmdlet.ParameterSetName) {
 
         Set-Rules $plan $Keep $exe
         Initialize-StateDir
-        Save-State $Keep $exe $AllowHost $netMap
-        if ($NoAutoRefresh) { Unregister-RefreshTask } else { Register-RefreshTask }
-        Write-RefreshLog "Locked to '$Keep'. Login /24s open: $($nets -join ', ')"
+        Save-State $Keep $exe $AllowHost $netMap $owner
+        # A temporary lock needs the task: it is what unlocks after the owner exits.
+        if ($NoAutoRefresh -and -not $owner) { Unregister-RefreshTask } else { Register-RefreshTask }
+        $until = if ($owner) { " until process $OwnerPid exits" } else { '' }
+        Write-RefreshLog "Locked to '$Keep'$until. Login /24s open: $($nets -join ', ')"
 
-        Write-Host "Blocked $($plan.Addresses.Count) ranges from $($plan.BlockNames.Count) lists for:" -ForegroundColor Green
+        Write-Host "Blocked $($plan.Addresses.Count) ranges ($($plan.V6Count) IPv6) from $($plan.BlockNames.Count) regions for:" -ForegroundColor Green
         Write-Host "  $exe"
         Write-Host "Kept reachable: $($plan.KeepNames -join ', ')"
         Write-Host "Battle.net login/patch /24s kept: $($nets.Count)"
-        if (-not $NoAutoRefresh) { Write-Host "Login IPs re-checked every $RefreshMins min." }
+        if (-not $NoAutoRefresh -or $owner) { Write-Host "Login IPs re-checked every $RefreshMins min." }
+        if ($owner) { Write-Host "Temporary lock: unlocks automatically when process $OwnerPid exits." }
         Write-Host 'Restart Overwatch if it is running. Unlock before grouping with friends on other servers.'
     }
     'Update' {
@@ -459,6 +485,17 @@ switch ($PSCmdlet.ParameterSetName) {
             Unregister-RefreshTask
             return
         }
+        if ($state.Owner) {
+            # Temporary lock: end it once the owning window is gone (closed, crashed, or rebooted).
+            $op = Get-Process -Id $state.Owner.Pid -ErrorAction SilentlyContinue
+            if (-not $op -or [string]$op.StartTime.ToUniversalTime().Ticks -ne $state.Owner.Start) {
+                $n = Remove-Rules
+                Remove-Item $StateFile
+                Write-RefreshLog "Temporary lock ended (process $($state.Owner.Pid) exited); removed $n rules."
+                Unregister-RefreshTask
+                return
+            }
+        }
         $known = @{}
         if ($state.Nets) {
             foreach ($p in $state.Nets.PSObject.Properties) { $known[$p.Name] = [datetime]$p.Value }
@@ -474,15 +511,16 @@ switch ($PSCmdlet.ParameterSetName) {
         foreach ($n in $expired) { $known.Remove($n) }
 
         if ($new.Count -or $expired.Count) {
-            $lists = Read-CachedLists
-            if (-not $lists) { Write-RefreshLog 'No cached lists; cannot rebuild.'; return }
+            $cache = Read-GcpCache
+            if (-not $cache) { Write-RefreshLog 'No cached ranges; cannot rebuild.'; return }
+            $lists = ConvertTo-RegionLists $cache
             $plan = Get-BlockPlan $lists $state.Keep @($known.Keys)
             Set-Rules $plan $state.Keep $state.Exe
             Write-RefreshLog "Rebuilt rules. New login /24s: $($new -join ', '). Expired: $($expired -join ', ')"
         }
         $netMap = @{}
         foreach ($k in $known.Keys) { $netMap[$k] = $known[$k].ToString('o') }
-        Save-State $state.Keep $state.Exe @($state.AllowHost) $netMap
+        Save-State $state.Keep $state.Exe @($state.AllowHost) $netMap $state.Owner
     }
     default { Show-Status }
 }

@@ -100,6 +100,9 @@ $card.Controls.AddRange(@($dot, $stateText, $detailText))
 
 # region tiles
 $regionLabel = New-Label 'REGION' 20 180 (Font 8.5 'Bold') $C.Muted
+$btnUpdate = New-FlatButton 'Update IP lists' 300 174 120 24
+$btnUpdate.Font = Font 8.5
+$btnUpdate.ForeColor = $C.Muted
 $tiles = @{}
 $i = 0
 foreach ($name in $regions.Keys) {
@@ -132,7 +135,7 @@ $logWrap.Controls.Add($log)
 
 $footer = New-Label 'Verify in a match: Ctrl+Shift+N shows the server IP' 20 458 (Font 8.5) $C.Muted
 
-$form.Controls.AddRange(@($title, $subtitle, $card, $regionLabel, $btnLock, $btnUnlock, $logWrap, $footer))
+$form.Controls.AddRange(@($title, $subtitle, $card, $regionLabel, $btnUpdate, $btnLock, $btnUnlock, $logWrap, $footer))
 $form.Controls.AddRange([Windows.Forms.Control[]]$tiles.Values)
 
 # --- behaviour ---------------------------------------------------------------
@@ -173,34 +176,56 @@ function Update-Status {
     if ($tiles.Contains($name)) { Set-Selected $name }
 }
 
-function Set-Busy([bool]$busy, [string]$text) {
+function Set-Busy([bool]$busy, [string]$text, [string]$detail) {
     # Not $c: PowerShell names are case-insensitive and $C is the theme.
-    foreach ($ctl in @($btnLock, $btnUnlock) + @($tiles.Values)) { $ctl.Enabled = -not $busy }
+    foreach ($ctl in @($btnLock, $btnUnlock, $btnUpdate) + @($tiles.Values)) { $ctl.Enabled = -not $busy }
     $form.UseWaitCursor = $busy
-    if ($busy) { Set-State $text 'Fetching server lists and updating firewall...' $C.Accent; $log.Text = '' }
+    if ($busy) { Set-State $text $detail $C.Accent; $log.Text = '' }
 }
 
-# Run ow-lock.ps1 on a background runspace so the window stays responsive.
+# All work runs on one long-lived background runspace: the window stays responsive, and the slow
+# first-use module loads (firewall, scheduled tasks) happen once, in a warm-up while the user picks a region.
+$runspace = [runspacefactory]::CreateRunspace()
+$runspace.Open()
+$runCore = { param($core, $p) & $core @p *>&1 | ForEach-Object { "$_" } }
 $timer = New-Object Windows.Forms.Timer -Property @{ Interval = 120 }
-function Start-Core([hashtable]$params, [string]$busyText) {
-    if ($script:job) { return }
-    Set-Busy $true $busyText
+$script:pending = $null
+
+function Invoke-Background([scriptblock]$body, [object[]]$arguments, [bool]$quiet) {
     $ps = [powershell]::Create()
-    [void]$ps.AddScript({
-        param($core, $p)
-        & $core @p *>&1 | ForEach-Object { "$_" }
-    }).AddArgument($core).AddArgument($params)
-    $script:job = @{ PS = $ps; Handle = $ps.BeginInvoke() }
+    $ps.Runspace = $runspace
+    [void]$ps.AddScript($body)
+    foreach ($a in $arguments) { [void]$ps.AddArgument($a) }
+    $script:job = @{ PS = $ps; Handle = $ps.BeginInvoke(); Quiet = $quiet }
     $timer.Start()
+}
+
+function Start-Core([hashtable]$params, [string]$busyText, [string]$detail) {
+    if ($script:job -and -not $script:job.Quiet) { return }
+    Set-Busy $true $busyText $detail
+    if ($script:job) { $script:pending = $params; return }   # warm-up still running; start right after
+    Invoke-Background $runCore @($core, $params) $false
 }
 
 $timer.Add_Tick({
     if (-not $script:job.Handle.IsCompleted) { return }
     $timer.Stop()
+    $done = $script:job
+    $script:job = $null
+
+    if ($done.Quiet) {
+        try { [void]$done.PS.EndInvoke($done.Handle) } catch { } finally { $done.PS.Dispose() }
+        if ($script:pending) {
+            $p = $script:pending; $script:pending = $null
+            Invoke-Background $runCore @($core, $p) $false
+        }
+        return
+    }
+
     $failed = $false
     try {
-        $out = @($script:job.PS.EndInvoke($script:job.Handle))
-        $out += @($script:job.PS.Streams.Error | ForEach-Object { "ERROR: $($_.Exception.Message)" })
+        $out = @($done.PS.EndInvoke($done.Handle))
+        $out += @($done.PS.Streams.Error | ForEach-Object { "ERROR: $($_.Exception.Message)" })
         $log.Text = $out -join "`r`n"
     }
     catch {
@@ -210,19 +235,35 @@ $timer.Add_Tick({
         $failed = $true
     }
     finally {
-        $script:job.PS.Dispose(); $script:job = $null
-        Set-Busy $false ''
+        $done.PS.Dispose()
+        Set-Busy $false '' ''
         Update-Status
         if ($failed) { $dot.ForeColor = $C.Err }
     }
 })
 
-$btnLock.Add_Click({ Start-Core @{ On = $true; Keep = $regions[$script:selected] } "Locking to $($script:selected)..." })
-$btnUnlock.Add_Click({ Start-Core @{ Off = $true } 'Unlocking...' })
+$btnLock.Add_Click({
+    Start-Core @{ On = $true; Keep = $regions[$script:selected] } "Locking to $($script:selected)..." 'Updating firewall rules...'
+})
+$btnUnlock.Add_Click({ Start-Core @{ Off = $true } 'Unlocking...' 'Removing firewall rules...' })
+$btnUpdate.Add_Click({
+    Start-Core @{ Update = $true } 'Updating IP lists...' 'Checking upstream for newer datacenter lists...'
+})
+$form.Add_FormClosed({ $runspace.Dispose() })
 
 Set-Selected 'Singapore'
 Update-Status
-$form.Add_Shown({ $form.ActiveControl = $title })
+$form.Add_Shown({
+    $form.ActiveControl = $title
+    if (-not $Screenshot) {
+        Invoke-Background {
+            Import-Module NetSecurity, ScheduledTasks
+            $null = Get-NetFirewallRule -Group 'OW-ForceServer' -ErrorAction SilentlyContinue
+            $null = Get-ScheduledTask -TaskName 'OverwatchServerLock-Refresh' -ErrorAction SilentlyContinue
+            Add-Type -AssemblyName System.Net.Http
+        } @() $true
+    }
+})
 
 if ($Screenshot) {
     $form.Add_Shown({

@@ -7,11 +7,15 @@
   subtracts the ranges of the region you keep plus the Battle.net login/patch endpoints, and adds
   Windows Firewall block rules scoped to Overwatch.exe only (other apps using Google Cloud are untouched).
 
+  The lists are cached; -On uses the cache and only downloads when none exists. -Update checks upstream
+  for newer lists (downloading only changed files) and re-applies an active lock.
+
   Battle.net login hosts rotate IPs. -On registers a SYSTEM scheduled task that re-resolves them every
   few minutes (-Refresh) and rebuilds the rules from the cached lists when a new IP block appears.
 
 .EXAMPLE
   .\ow-lock.ps1 -On          # block everything except Singapore, enable login IP auto-refresh
+  .\ow-lock.ps1 -Update      # fetch newer datacenter lists, re-apply the lock if on
   .\ow-lock.ps1 -Off         # remove all rules and the refresh task
   .\ow-lock.ps1 -Status      # show current state
   .\ow-lock.ps1 -On -DryRun  # preview, no changes
@@ -25,6 +29,8 @@ param(
     [Parameter(ParameterSetName = 'Status')][switch]$Status,
     # Re-resolve login hosts and rebuild rules if their IPs moved (run by the scheduled task).
     [Parameter(ParameterSetName = 'Refresh', Mandatory)][switch]$Refresh,
+    # Check upstream for newer datacenter lists and re-apply the lock if it is on.
+    [Parameter(ParameterSetName = 'Update', Mandatory)][switch]$Update,
     # Regex matched against IP list file names; matching lists are kept reachable.
     [Parameter(ParameterSetName = 'On')][string]$Keep = 'Singapore',
     [Parameter(ParameterSetName = 'On')][string]$GamePath,
@@ -134,9 +140,11 @@ function Remove-IpRanges($block, $keep) {
 
 # --- data --------------------------------------------------------------------
 # State dir holds a copy of this script that SYSTEM runs, so only admins/SYSTEM may write to it.
+# Always re-applied (owner too): a standard user could pre-create this folder under ProgramData.
 function Initialize-StateDir {
     if (-not (Test-Path $StateDir)) { New-Item -ItemType Directory -Path $StateDir | Out-Null }
-    $null = icacls $StateDir /inheritance:r /grant:r '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-545:(OI)(CI)RX'
+    $null = icacls $StateDir /setowner '*S-1-5-32-544' /T /C
+    $null = icacls $StateDir /inheritance:r /grant:r '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-545:(OI)(CI)RX' /T /C
 }
 
 # Cache: { "<file name>": { "Sha": "<git blob sha>", "Text": "<contents>" } }.
@@ -160,8 +168,30 @@ function Read-CachedLists {
     $lists
 }
 
-# One API call lists the upstream files with their git SHAs; only new or changed files are downloaded.
-function Get-IpLists {
+function Invoke-ParallelDownload([string[]]$urls) {
+    Add-Type -AssemblyName System.Net.Http
+    # .NET Framework allows 2 connections per host by default, which would serialize the downloads.
+    if ([Net.ServicePointManager]::DefaultConnectionLimit -lt 16) { [Net.ServicePointManager]::DefaultConnectionLimit = 16 }
+    $client = New-Object Net.Http.HttpClient
+    $client.DefaultRequestHeaders.UserAgent.ParseAdd('ow-force-server')
+    try {
+        $tasks = @($urls | ForEach-Object { $client.GetStringAsync($_) })
+        [Threading.Tasks.Task]::WaitAll([Threading.Tasks.Task[]]$tasks)
+        @($tasks | ForEach-Object { $_.Result })
+    }
+    finally { $client.Dispose() }
+}
+
+# Cache first; -Online checks upstream. One API call lists the files with their git SHAs and only new
+# or changed files are downloaded (in parallel).
+function Get-IpLists([switch]$Online) {
+    if (-not $Online) {
+        $cached = Read-CachedLists
+        if ($cached) {
+            Write-Host "Using cached IP lists ($($cached.Count)). Use Update IP lists to check for newer ones." -ForegroundColor DarkGray
+            return $cached
+        }
+    }
     try {
         # Windows PowerShell emits the JSON array as one object; unroll before filtering.
         $index = Invoke-RestMethod $RepoApi -Headers @{ 'User-Agent' = 'ow-force-server' }
@@ -169,13 +199,18 @@ function Get-IpLists {
             Where-Object { $_.type -eq 'file' -and $_.name -match '^(Ip_ranges_|cfg - ).*\.txt$' }
         $cache   = Read-CacheEntries
         $entries = @{}
-        $changed = @()
+        $stale   = @()
         foreach ($f in $files) {
             $hit = $cache[$f.name]
-            if ($hit -and $hit.Sha -eq $f.sha) { $entries[$f.name] = $hit; continue }
-            $entries[$f.name] = @{ Sha = $f.sha; Text = (Invoke-WebRequest $f.download_url -UseBasicParsing).Content }
-            $changed += $f.name
+            if ($hit -and $hit.Sha -eq $f.sha) { $entries[$f.name] = $hit } else { $stale += $f }
         }
+        if ($stale.Count) {
+            $texts = Invoke-ParallelDownload @($stale | ForEach-Object { $_.download_url })
+            for ($i = 0; $i -lt $stale.Count; $i++) {
+                $entries[$stale[$i].name] = @{ Sha = $stale[$i].sha; Text = $texts[$i] }
+            }
+        }
+        $changed = @($stale | ForEach-Object { $_.name })
         $removed = @($cache.Keys | Where-Object { -not $entries.ContainsKey($_) })
 
         if ($changed.Count -or $removed.Count) {
@@ -291,9 +326,19 @@ function Set-Rules($plan, [string]$keep, [string]$exe) {
 
 function Register-RefreshTask {
     $target = Join-Path $StateDir 'ow-lock.ps1'
-    if ($PSCommandPath -ne $target) { Copy-Item $PSCommandPath $target -Force }
-    $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument (
-        "-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$target`" -Refresh")
+    if ($PSCommandPath -ne $target -and
+        (-not (Test-Path $target) -or (Get-FileHash $PSCommandPath).Hash -ne (Get-FileHash $target).Hash)) {
+        Copy-Item $PSCommandPath $target -Force
+    }
+    $arguments = "-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$target`" -Refresh"
+
+    # Re-registering is slow; skip when an identical task already exists.
+    $existing = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+    if ($existing -and $existing.State -ne 'Disabled' -and
+        $existing.Actions[0].Arguments -eq $arguments -and
+        $existing.Triggers[0].Repetition.Interval -eq "PT$($RefreshMins)M") { return }
+
+    $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $arguments
     $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) `
         -RepetitionInterval (New-TimeSpan -Minutes $RefreshMins)
     $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
@@ -346,6 +391,7 @@ switch ($PSCmdlet.ParameterSetName) {
         $n = Remove-Rules
         Unregister-RefreshTask
         if (Test-Path $StateFile) { Remove-Item $StateFile }
+        if (Test-Path $StateDir) { Write-RefreshLog "Unlocked; removed $n rules." }
         Write-Host "Removed $n rules and the refresh task. Overwatch can use any server again." -ForegroundColor Green
     }
     'On' {
@@ -364,11 +410,20 @@ switch ($PSCmdlet.ParameterSetName) {
             return
         }
 
+        # Keep login /24s seen recently by the refresh task, so re-locking never drops a working one.
+        $netMap = @{}
+        $prev = Read-State
+        if ($prev -and $prev.Nets) {
+            foreach ($p in $prev.Nets.PSObject.Properties) {
+                if (((Get-Date) - [datetime]$p.Value).TotalDays -le $NetTtlDays) { $netMap[$p.Name] = $p.Value }
+            }
+        }
+        $now = (Get-Date).ToString('o')
+        foreach ($n in $nets) { $netMap[$n] = $now }
+        if ($netMap.Count -gt $nets.Count) { $plan = Get-BlockPlan $lists $Keep @($netMap.Keys) }
+
         Set-Rules $plan $Keep $exe
         Initialize-StateDir
-        $now = (Get-Date).ToString('o')
-        $netMap = @{}
-        foreach ($n in $nets) { $netMap[$n] = $now }
         Save-State $Keep $exe $AllowHost $netMap
         if ($NoAutoRefresh) { Unregister-RefreshTask } else { Register-RefreshTask }
         Write-RefreshLog "Locked to '$Keep'. Login /24s open: $($nets -join ', ')"
@@ -379,6 +434,20 @@ switch ($PSCmdlet.ParameterSetName) {
         Write-Host "Battle.net login/patch /24s kept: $($nets.Count)"
         if (-not $NoAutoRefresh) { Write-Host "Login IPs re-checked every $RefreshMins min." }
         Write-Host 'Restart Overwatch if it is running. Unlock before grouping with friends on other servers.'
+    }
+    'Update' {
+        $lists = Get-IpLists -Online
+        $state = Read-State
+        if (-not $state -or -not @(Get-NetFirewallRule -Group $RuleGroup -ErrorAction SilentlyContinue).Count) {
+            Write-Host 'Not locked; the new lists will be used on the next Lock.' -ForegroundColor Green
+            return
+        }
+        $nets = @(Resolve-ServiceNets @($state.AllowHost))
+        if ($state.Nets) { $nets = @(@($nets) + @($state.Nets.PSObject.Properties.Name) | Sort-Object -Unique) }
+        $plan = Get-BlockPlan $lists $state.Keep $nets
+        Set-Rules $plan $state.Keep $state.Exe
+        Write-RefreshLog "Lists updated; lock re-applied with $($plan.Addresses.Count) ranges."
+        Write-Host "Re-applied lock to '$($state.Keep)': $($plan.Addresses.Count) ranges blocked." -ForegroundColor Green
     }
     'Refresh' {
         $state = Read-State

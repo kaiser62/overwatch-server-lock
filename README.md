@@ -28,8 +28,10 @@ so matchmaking can only place you on the region you chose.
 
 ## How it works
 
-1. Downloads the current Overwatch 2 datacenter IP lists maintained by the community
+1. Uses the Overwatch 2 datacenter IP lists maintained by the community
    ([foryVERX/Overwatch-Server-Selector](https://github.com/foryVERX/Overwatch-Server-Selector)).
+   They are downloaded once and cached; **Update IP lists** checks upstream and downloads only files that
+   changed (in parallel), then re-applies the lock if it is on.
 2. Subtracts the ranges of the region you keep, plus the Battle.net login and patch endpoints
    (resolved via DNS at lock time) so sign-in keeps working.
 3. Creates inbound and outbound Windows Firewall block rules, scoped to `Overwatch.exe` only.
@@ -48,7 +50,7 @@ and the scheduled task. Settings, cached lists and `refresh.log` live in `%Progr
 2. Close Overwatch.
 3. Double-click the exe and accept the UAC prompt (firewall rules need admin).
    SmartScreen may warn because the exe is unsigned: **More info** then **Run anyway**.
-4. Pick a region and click **Lock**.
+4. Pick a region and click **Lock**. Use **Update IP lists** now and then to pull newer datacenter lists.
 5. Start Overwatch and queue. In a match, press `Ctrl+Shift+N` to see the server IP and confirm.
 6. Click **Unlock** when you are done, or before grouping with friends who play on other servers.
 
@@ -61,6 +63,7 @@ The exe is a thin launcher around two PowerShell scripts in [`src/`](src). You c
 ```powershell
 .\src\ow-lock.ps1 -On                   # lock to Singapore (default)
 .\src\ow-lock.ps1 -On -Keep Japan       # lock to another region (regex on list names)
+.\src\ow-lock.ps1 -Update               # pull newer datacenter lists, re-apply the lock if on
 .\src\ow-lock.ps1 -On -DryRun -Verbose  # preview the ranges, change nothing
 .\src\ow-lock.ps1 -On -NoAutoRefresh  # lock without the login IP refresh task
 .\src\ow-lock.ps1 -Status
@@ -97,7 +100,7 @@ then check those IPs against the blocked ranges with `-DryRun -Verbose`. Please
 
 ## Caveats
 
-- **Lists go stale.** Blizzard moves and adds servers. Each lock checks upstream (one request) and downloads only lists that changed; if you start landing on the
+- **Lists go stale.** Blizzard moves and adds servers. Click **Update IP lists** (one request when nothing changed); if you start landing on the
   wrong region again, the upstream lists need updating.
 - **Longer queues** are possible, since you only match with players on one datacenter.
 - **Groups:** if your party leader is placed on a blocked datacenter you will fail to connect. Unlock first.

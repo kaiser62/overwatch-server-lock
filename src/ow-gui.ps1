@@ -171,7 +171,8 @@ function Update-Status {
 }
 
 function Set-Busy([bool]$busy, [string]$text) {
-    foreach ($c in @($btnLock, $btnUnlock) + @($tiles.Values)) { $c.Enabled = -not $busy }
+    # Not $c: PowerShell names are case-insensitive and $C is the theme.
+    foreach ($ctl in @($btnLock, $btnUnlock) + @($tiles.Values)) { $ctl.Enabled = -not $busy }
     $form.UseWaitCursor = $busy
     if ($busy) { Set-State $text 'Fetching server lists and updating firewall...' $C.Accent; $log.Text = '' }
 }

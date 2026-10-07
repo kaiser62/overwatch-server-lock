@@ -11,6 +11,12 @@
 
 ---
 
+> [!WARNING]
+> **Beta.** This is an early version. Locking can break Battle.net login (`Time out communicating with
+> Battle.net services`) if your account signs in through a server that sits inside a blocked region.
+> If that happens, see [Login broken?](#login-broken) below, or
+> [open an issue](../../issues/new) with your account region and what you saw.
+
 ## Why
 
 Overwatch 2 picks a datacenter from a latency probe before each match. In regions with several nearby
@@ -56,6 +62,32 @@ The exe is a thin launcher around two PowerShell scripts in [`src/`](src). You c
 ```
 
 `-GamePath` overrides auto-detection of `Overwatch.exe` (Steam and Battle.net installs are found automatically).
+
+## Login broken?
+
+Battle.net login servers live inside the same cloud ranges as game servers. The lock keeps the known ones
+reachable (`us/eu/kr/tw.actual.battle.net`, version/patch servers), but your region may use another host.
+These login hosts also **rotate IPs**: the IPs are captured when you click Lock, so login can break later
+even if it worked at first. Clicking **Lock** again picks up the current IPs.
+
+**Quick workaround:** click **Unlock**, log in, click **Lock** again, then queue. Already-open connections
+are not cut, so you stay signed in.
+
+**Permanent fix:** keep the login host for your region reachable:
+
+```powershell
+.\src\ow-lock.ps1 -On -AllowHost 'kr.actual.battle.net', 'some.other.host'
+```
+
+Or add it to `$ServiceHosts` at the top of [`src/ow-lock.ps1`](src/ow-lock.ps1) and rebuild the exe.
+To find which host is failing: unlock, start Overwatch, and while it logs in run
+
+```powershell
+Get-NetTCPConnection -OwningProcess (Get-Process Overwatch).Id | Select RemoteAddress, RemotePort
+```
+
+then check those IPs against the blocked ranges with `-DryRun -Verbose`. Please
+[open an issue](../../issues/new) with the host so it can be added for everyone.
 
 ## Caveats
 

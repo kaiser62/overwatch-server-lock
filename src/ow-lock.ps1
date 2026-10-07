@@ -22,6 +22,8 @@ param(
     # Regex matched against IP list file names; matching lists are kept reachable.
     [Parameter(ParameterSetName = 'On')][string]$Keep = 'Singapore',
     [Parameter(ParameterSetName = 'On')][string]$GamePath,
+    # Extra hostnames (e.g. a regional Battle.net login server) to keep reachable.
+    [Parameter(ParameterSetName = 'On')][string[]]$AllowHost = @(),
     # Show what would be blocked without touching the firewall.
     [Parameter(ParameterSetName = 'On')][switch]$DryRun
 )
@@ -201,7 +203,7 @@ switch ($PSCmdlet.ParameterSetName) {
             throw "No IP list matches -Keep '$Keep'. Available: $($lists.Keys -join ', ')"
         }
 
-        $serviceIps = @(foreach ($h in $ServiceHosts) {
+        $serviceIps = @(foreach ($h in @($ServiceHosts) + $AllowHost) {
             try {
                 [Net.Dns]::GetHostAddresses($h) | Where-Object AddressFamily -eq 'InterNetwork' |
                     ForEach-Object { $_.IPAddressToString }

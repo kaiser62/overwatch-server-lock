@@ -144,7 +144,9 @@ function Remove-IpRanges($block, $keep) {
 function Initialize-StateDir {
     if (-not (Test-Path $StateDir)) { New-Item -ItemType Directory -Path $StateDir | Out-Null }
     $null = icacls $StateDir /setowner '*S-1-5-32-544' /T /C
-    $null = icacls $StateDir /inheritance:r /grant:r '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-545:(OI)(CI)RX' /T /C
+    $null = icacls $StateDir /inheritance:r /grant:r '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-545:(OI)(CI)RX' /C
+    # Files just inherit the folder ACL. /reset also drops any extra grants on pre-created files.
+    if (Get-ChildItem $StateDir -Force) { $null = icacls (Join-Path $StateDir '*') /reset /T /C }
 }
 
 # Cache: { "<file name>": { "Sha": "<git blob sha>", "Text": "<contents>" } }.
@@ -152,7 +154,8 @@ function Initialize-StateDir {
 function Read-CacheEntries {
     $entries = @{}
     if (-not (Test-Path $CacheFile)) { return $entries }
-    $obj = Get-Content $CacheFile -Raw | ConvertFrom-Json
+    try { $obj = Get-Content $CacheFile -Raw -ErrorAction Stop | ConvertFrom-Json }
+    catch { Write-Warning "Cannot read $CacheFile ($($_.Exception.Message)); run as administrator."; return $entries }
     foreach ($p in $obj.PSObject.Properties) {
         $entries[$p.Name] = if ($p.Value -is [string]) { @{ Sha = $null; Text = $p.Value } }
                             else { @{ Sha = $p.Value.Sha; Text = $p.Value.Text } }

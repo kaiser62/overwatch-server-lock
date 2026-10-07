@@ -49,14 +49,29 @@ function Font($size, $style = 'Regular', $family = 'Segoe UI') {
 }
 
 # Display name -> regex matched against IP list file names.
-$regions = [ordered]@{
-    'Singapore'   = 'Singapore'
-    'Japan'       = 'Japan'
-    'South Korea' = 'Korea'
-    'Taiwan'      = 'Taiwan'
-    'Australia'   = 'Australia'
-    'Middle East' = 'ME\.txt|Bahrain|Qatar|KSA'
+# Grouped for the tile layout. Regexes match foryVERX/Overwatch-Server-Selector list names
+# (e.g. "Ip_ranges_NA_West.txt", "cfg - NA - USA West 2 - GUW2.txt").
+$regionGroups = [ordered]@{
+    'ASIA / PACIFIC' = [ordered]@{
+        'Singapore'   = 'Singapore'
+        'Japan'       = 'Japan'
+        'South Korea' = 'Korea'
+        'Taiwan'      = 'Taiwan'
+        'Australia'   = 'Australia'
+    }
+    'AMERICAS' = [ordered]@{
+        'NA West'     = 'NA_West|USA West'
+        'NA Central'  = 'NA_central|USA Central'
+        'NA East'     = 'NA_East|USA East'
+        'Brazil'      = 'Brazil'
+    }
+    'EUROPE / MIDDLE EAST' = [ordered]@{
+        'Europe'      = 'EU'
+        'Middle East' = 'ME\.txt|Bahrain|Qatar|KSA'
+    }
 }
+$regions = [ordered]@{}
+foreach ($g in $regionGroups.Values) { foreach ($k in $g.Keys) { $regions[$k] = $g[$k] } }
 
 # --- controls ----------------------------------------------------------------
 function New-Label($text, $x, $y, $font, $color) {
@@ -78,7 +93,7 @@ function New-FlatButton($text, $x, $y, $w, $h) {
 }
 
 $form = New-Object Windows.Forms.Form -Property @{
-    Text = 'Overwatch Server Lock'; ClientSize = '440,486'; StartPosition = 'CenterScreen'
+    Text = 'Overwatch Server Lock'; ClientSize = '440,642'; StartPosition = 'CenterScreen'
     FormBorderStyle = 'FixedSingle'; MaximizeBox = $false; BackColor = $C.Bg; ForeColor = $C.Text
     Font = Font 10
 }
@@ -98,44 +113,51 @@ $stateText  = New-Label 'Checking...' 48 14 (Font 12.5 'Bold') $C.Text
 $detailText = New-Label '' 50 46 (Font 9) $C.Muted
 $card.Controls.AddRange(@($dot, $stateText, $detailText))
 
-# region tiles
-$regionLabel = New-Label 'REGION' 20 180 (Font 8.5 'Bold') $C.Muted
+# region tiles, grouped
 $btnUpdate = New-FlatButton 'Update IP lists' 300 174 120 24
 $btnUpdate.Font = Font 8.5
 $btnUpdate.ForeColor = $C.Muted
+$groupLabels = @()
 $tiles = @{}
-$i = 0
-foreach ($name in $regions.Keys) {
-    $col = $i % 3; $row = [math]::Floor($i / 3)
-    $t = New-FlatButton $name (20 + $col * 136) (202 + $row * 50) 128 42
-    $t.Tag = $name
-    $t.Add_Click({ Set-Selected $this.Tag })
-    $tiles[$name] = $t
-    $i++
+$y = 180
+foreach ($group in $regionGroups.Keys) {
+    $groupLabels += New-Label $group 20 $y (Font 8.5 'Bold') $C.Muted
+    $y += 22
+    $i = 0
+    foreach ($name in $regionGroups[$group].Keys) {
+        $col = $i % 3
+        if ($i -gt 0 -and $col -eq 0) { $y += 42 }
+        $t = New-FlatButton $name (20 + $col * 136) $y 128 36
+        $t.Tag = $name
+        $t.Add_Click({ Set-Selected $this.Tag })
+        $tiles[$name] = $t
+        $i++
+    }
+    $y += 50
 }
 
 # actions
-$btnLock = New-FlatButton 'Lock' 20 314 196 46
+$btnLock = New-FlatButton 'Lock' 20 470 196 46
 $btnLock.Font = Font 11 'Bold'
 $btnLock.BackColor = $C.Accent; $btnLock.ForeColor = $C.AccentText
 $btnLock.FlatAppearance.BorderSize = 0
 $btnLock.FlatAppearance.MouseOverBackColor = Rgb 255 178 64
 $btnLock.FlatAppearance.MouseDownBackColor = Rgb 220 136 16
 
-$btnUnlock = New-FlatButton 'Unlock' 224 314 196 46
+$btnUnlock = New-FlatButton 'Unlock' 224 470 196 46
 $btnUnlock.Font = Font 11 'Bold'
 
 # log
-$logWrap = New-Object Windows.Forms.Panel -Property @{ Location = '20,374'; Size = '400,74'; BackColor = $C.Card; Padding = '10,8,6,6' }
+$logWrap = New-Object Windows.Forms.Panel -Property @{ Location = '20,530'; Size = '400,74'; BackColor = $C.Card; Padding = '10,8,6,6' }
 $log = New-Object Windows.Forms.TextBox -Property @{
     Dock = 'Fill'; Multiline = $true; ReadOnly = $true; ScrollBars = 'None'; BorderStyle = 'None'; TabStop = $false
     BackColor = $C.Card; ForeColor = $C.Muted; Font = Font 8.5 'Regular' 'Consolas'; Text = 'Ready.'
 }
 $logWrap.Controls.Add($log)
 
-$footer = New-Label 'Verify in a match: Ctrl+Shift+N shows the server IP' 20 458 (Font 8.5) $C.Muted
+$footer = New-Label 'Verify in a match: Ctrl+Shift+N shows the server IP' 20 614 (Font 8.5) $C.Muted
 
-$form.Controls.AddRange(@($title, $subtitle, $card, $regionLabel, $btnUpdate, $btnLock, $btnUnlock, $logWrap, $footer))
+$form.Controls.AddRange(@($title, $subtitle, $card, $btnUpdate, $btnLock, $btnUnlock, $logWrap, $footer) + $groupLabels)
 $form.Controls.AddRange([Windows.Forms.Control[]]$tiles.Values)
 
 # --- behaviour ---------------------------------------------------------------

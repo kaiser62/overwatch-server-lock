@@ -5,8 +5,8 @@
 <h1 align="center">Overwatch Server Lock</h1>
 
 <p align="center">
-  Force Overwatch 2 matchmaking onto a single datacenter (Singapore, Tokyo, Seoul, Taiwan, Sydney, Middle East)
-  using scoped Windows Firewall rules. One small exe, dark UI, one click to lock or unlock.
+  Force Overwatch 2 matchmaking onto a single datacenter, anywhere in the world (Asia, Americas, Europe,
+  Middle East) using scoped Windows Firewall rules. One small exe, dark UI, one click to lock or unlock.
 </p>
 
 ---
@@ -20,11 +20,22 @@
 ## Why
 
 Overwatch 2 picks a datacenter from a latency probe before each match. In regions with several nearby
-datacenters (SEA, East Asia, Middle East) you can end up on a server that is technically "close" but plays
+datacenters (SEA, East Asia, North America, Europe, Middle East) you can end up on a server that is technically "close" but plays
 worse for you, and there is no in-game option to choose.
 
 Overwatch Server Lock blocks every datacenter except the one you pick. The probes to the others time out,
 so matchmaking can only place you on the region you chose.
+
+## Regions
+
+| Group | Regions |
+|---|---|
+| Asia / Pacific | Singapore, Japan, South Korea, Taiwan, Australia |
+| Americas | NA West, NA Central, NA East, Brazil |
+| Europe / Middle East | Europe (Netherlands, Finland), Middle East (Bahrain, Qatar, KSA) |
+
+Each region keeps every community list whose name matches it (for example NA West keeps
+`Ip_ranges_NA_West.txt` and the `USA West` LAX1/GUW2 lists) and blocks all the others.
 
 ## How it works
 
@@ -63,6 +74,7 @@ The exe is a thin launcher around two PowerShell scripts in [`src/`](src). You c
 ```powershell
 .\src\ow-lock.ps1 -On                   # lock to Singapore (default)
 .\src\ow-lock.ps1 -On -Keep Japan       # lock to another region (regex on list names)
+.\src\ow-lock.ps1 -On -Keep 'NA_West|USA West'   # NA West; also 'NA_central|USA Central', 'NA_East|USA East', 'Brazil', 'EU'
 .\src\ow-lock.ps1 -Update               # pull newer datacenter lists, re-apply the lock if on
 .\src\ow-lock.ps1 -On -DryRun -Verbose  # preview the ranges, change nothing
 .\src\ow-lock.ps1 -On -NoAutoRefresh  # lock without the login IP refresh task

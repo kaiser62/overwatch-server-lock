@@ -164,7 +164,9 @@ function Update-Status {
     if (-not $name) { $name = $keep }
     $ranges = ($rules | Where-Object Direction -eq 'Outbound' | Get-NetFirewallAddressFilter |
         ForEach-Object { @($_.RemoteAddress).Count } | Measure-Object -Sum).Sum
-    Set-State "Locked to $name" "$ranges ranges blocked for Overwatch.exe" $C.Ok
+    $refresh = if (Get-ScheduledTask -TaskName 'OverwatchServerLock-Refresh' -ErrorAction SilentlyContinue) {
+        'login IPs auto-refresh' } else { 'login IP refresh off' }
+    Set-State "Locked to $name" "$ranges ranges blocked, $refresh" $C.Ok
     if ($tiles.Contains($name)) { Set-Selected $name }
 }
 

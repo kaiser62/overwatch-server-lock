@@ -34,8 +34,13 @@ so matchmaking can only place you on the region you chose.
    (resolved via DNS at lock time) so sign-in keeps working.
 3. Creates inbound and outbound Windows Firewall block rules, scoped to `Overwatch.exe` only.
    Other apps that happen to use the same Google Cloud regions are not affected.
+4. Registers a scheduled task (`OverwatchServerLock-Refresh`, runs as SYSTEM every 2 minutes) that
+   re-resolves the Battle.net login hosts. Their IPs rotate; when a new address block shows up, the rules are
+   rebuilt from the cached lists so login keeps working. Previously seen login blocks stay open for 7 days.
 
-No game files are touched, nothing is injected, and no drivers are installed. Unlock removes every rule.
+No game files are touched, nothing is injected, and no drivers are installed. Unlock removes every rule
+and the scheduled task. Settings, cached lists and `refresh.log` live in `%ProgramData%\OverwatchServerLock`
+(writable by administrators only, since SYSTEM runs the script from there).
 
 ## Download and use
 
@@ -47,7 +52,7 @@ No game files are touched, nothing is injected, and no drivers are installed. Un
 5. Start Overwatch and queue. In a match, press `Ctrl+Shift+N` to see the server IP and confirm.
 6. Click **Unlock** when you are done, or before grouping with friends who play on other servers.
 
-Rules persist across reboots until you unlock.
+Rules and the login IP refresh persist across reboots until you unlock.
 
 ## Command line
 
@@ -57,8 +62,9 @@ The exe is a thin launcher around two PowerShell scripts in [`src/`](src). You c
 .\src\ow-lock.ps1 -On                   # lock to Singapore (default)
 .\src\ow-lock.ps1 -On -Keep Japan       # lock to another region (regex on list names)
 .\src\ow-lock.ps1 -On -DryRun -Verbose  # preview the ranges, change nothing
+.\src\ow-lock.ps1 -On -NoAutoRefresh  # lock without the login IP refresh task
 .\src\ow-lock.ps1 -Status
-.\src\ow-lock.ps1 -Off
+.\src\ow-lock.ps1 -Off                # remove rules and refresh task
 ```
 
 `-GamePath` overrides auto-detection of `Overwatch.exe` (Steam and Battle.net installs are found automatically).
@@ -66,9 +72,9 @@ The exe is a thin launcher around two PowerShell scripts in [`src/`](src). You c
 ## Login broken?
 
 Battle.net login servers live inside the same cloud ranges as game servers. The lock keeps the known ones
-reachable (`us/eu/kr/tw.actual.battle.net`, version/patch servers), but your region may use another host.
-These login hosts also **rotate IPs**: the IPs are captured when you click Lock, so login can break later
-even if it worked at first. Clicking **Lock** again picks up the current IPs.
+reachable (`us/eu/kr.actual.battle.net`, version/patch servers), but your region may use another host.
+These login hosts also **rotate IPs**. The auto-refresh task follows them, but it runs every 2 minutes, so
+right after a rotation login can fail briefly: wait a couple of minutes and retry, or click **Lock** again.
 
 **Quick workaround:** click **Unlock**, log in, click **Lock** again, then queue. Already-open connections
 are not cut, so you stay signed in.
@@ -79,7 +85,7 @@ are not cut, so you stay signed in.
 .\src\ow-lock.ps1 -On -AllowHost 'kr.actual.battle.net', 'some.other.host'
 ```
 
-Or add it to `$ServiceHosts` at the top of [`src/ow-lock.ps1`](src/ow-lock.ps1) and rebuild the exe.
+`-AllowHost` hosts are re-resolved by the refresh task too. Or add it to `$ServiceHosts` at the top of [`src/ow-lock.ps1`](src/ow-lock.ps1) and rebuild the exe.
 To find which host is failing: unlock, start Overwatch, and while it logs in run
 
 ```powershell

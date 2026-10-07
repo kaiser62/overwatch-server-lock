@@ -1,3 +1,5 @@
 dist/
 *.exe
 ow-ip-cache.json
+.claude-flow/
+".claude-flow/"  

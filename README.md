@@ -76,9 +76,28 @@ within 2 minutes. Settings, cached lists and `refresh.log` live in `%ProgramData
 4. Pick a region (the tiles show your ping to each) and click **Lock**. Use **Update IP lists** now and
    then to pull Google's latest ranges.
 5. Start Overwatch and queue. In a match, press `Ctrl+Shift+N` to see the server IP and confirm.
-6. Click **Unlock** when you are done, or before grouping with friends who play on other servers.
+6. Click **Unlock** when you are done. Playing with friends? See [Playing in a group](#playing-in-a-group).
 
 Rules and the login IP refresh persist across reboots until you unlock.
+
+## Playing in a group
+
+**Everyone in the group needs to lock to the same region.** The lock only blocks servers on your own PC;
+it cannot choose a server for the whole group. When you queue as a group, Overwatch picks one datacenter
+from everyone's latency. If a friend's PC can still reach a closer datacenter (for example Sydney), the game
+may pick it. Your friend gets in, and your connection times out because that datacenter is blocked for you.
+
+When every player in the group locks to the same region, that region is the only one everyone can reach,
+so the matchmaker has to use it.
+
+If your friends can't run the lock:
+
+- **Custom games:** set **Data Center Preference** in the lobby settings.
+- **Otherwise:** click **Unlock** while you play together, and accept their datacenter and your higher ping.
+  Tick **Unlock automatically when this window closes** next time so the lock comes back for solo queue.
+
+Keeping two regions (`-Keep 'Singapore|Australia'`) works the same as unlocking here. The game is still
+free to pick the farther datacenter.
 
 ## Command line
 
@@ -133,7 +152,7 @@ then check those IPs against the blocked ranges with `-DryRun -Verbose`. Please
   the wrong region, please open an issue with the server IP (`Ctrl+Shift+N`).
 - **Ping is approximate.** It is an ICMP ping to one server in the region; in-game latency can differ a little.
 - **Longer queues** are possible, since you only match with players on one datacenter.
-- **Groups:** if your party leader is placed on a blocked datacenter you will fail to connect. Unlock first.
+- **Groups:** every player needs to lock to the same region, or the game may pick a datacenter you have blocked and you will fail to connect. See [Playing in a group](#playing-in-a-group).
 - **VPNs:** normal full-tunnel VPNs and WireSock-based split tunnels (e.g. TunnlTo) keep the lock working.
   Some gaming accelerators that proxy traffic through their own process can bypass it.
 - **Use at your own risk.** This only uses the built-in Windows Firewall and does not modify the game, but

@@ -67,9 +67,13 @@ $NetTtlDays  = 7     # keep previously seen login /24s open this long (hosts rot
 # e.g. a Sydney match goes via ec02-eqsy4 = 137.221.85.x), so a lock must block those too. Only the
 # site /24s are listed: other addresses in that block carry Battle.net services (TCP 443).
 # Google regions that match no entry (India, Canada, Mexico, Africa, ...) are never blocked.
+# Edge sites that serve no region of their own. They are blocked under every lock: with Sydney blocked, a
+# Japan-locked client still joined a Sydney (syd2) match through ec01-eqty2 Tokyo (137.221.81.x).
+$AlwaysBlock = '137.221.81.0/24'   # eqty2 Tokyo
+
 $Regions = [ordered]@{
     'Singapore'   = @{ Gcp = '^asia-southeast';      Ranges = @() }
-    'Japan'       = @{ Gcp = '^asia-northeast[12]$'; Ranges = '137.221.81.0/24' }                       # eqty2 Tokyo
+    'Japan'       = @{ Gcp = '^asia-northeast[12]$'; Ranges = @() }
     'South Korea' = @{ Gcp = '^asia-northeast3$';    Ranges = '121.254.0.0/16', '117.52.0.0/16', '202.9.66.0/23', '110.45.208.0/24', '182.162.31.0/24',
                                                              '137.221.84.0/24' }                       # lgpy1 Seoul
     'Taiwan'      = @{ Gcp = '^asia-east';           Ranges = '5.42.160.0/22', '5.42.164.0/22', '137.221.112.0/24' }   # citw1 Taipei
@@ -330,7 +334,9 @@ function Get-BlockPlan($lists, [string]$keep, [string[]]$nets) {
     $keepRanges = Merge-IpRanges @(
         @($keepNames | ForEach-Object { ConvertFrom-IpList $lists[$_] }) +
         @(ConvertFrom-IpList $netText))
-    $blockRanges = Merge-IpRanges @($blockNames | ForEach-Object { ConvertFrom-IpList $lists[$_] })
+    $blockRanges = Merge-IpRanges @(
+        @($blockNames | ForEach-Object { ConvertFrom-IpList $lists[$_] }) +
+        @(ConvertFrom-IpList ($AlwaysBlock -join "`n")))
     $final       = Remove-IpRanges $blockRanges $keepRanges
     $addresses = @($final | ForEach-Object {
         if ($_[0] -eq $_[1]) { ConvertTo-IpString $_[0] }

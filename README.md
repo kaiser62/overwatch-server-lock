@@ -49,7 +49,8 @@ above), refreshed every 10 seconds.
    exact and current. Blizzard-owned datacenters (Korea, Taiwan, Sydney, Las Vegas, Chicago, Amsterdam)
    use fixed ranges. Blizzard also relays game traffic through its own per-city edge points
    (`137.221.x.0/24`, e.g. a Sydney match runs through Equinix Sydney), so each region includes its
-   edge sites as well. The list is downloaded once and cached; **Update IP lists** re-downloads it only
+   edge sites as well. An edge can also relay to a datacenter in another city (a Japan lock once
+   reached a Sydney match through the Tokyo edge), so edges with no region of their own are always blocked. The list is downloaded once and cached; **Update IP lists** re-downloads it only
    when Google has published a new version (one request), then re-applies the lock if it is on.
 2. Subtracts the ranges of the region you keep, plus the Battle.net login and patch endpoints
    (resolved via DNS at lock time) so sign-in keeps working.

@@ -62,19 +62,31 @@ $NetTtlDays  = 7     # keep previously seen login /24s open this long (hosts rot
 
 # Overwatch datacenters by region. Gcp is a regex on Google Cloud region names (the "scope" field in
 # cloud.json), so new zones in a family are picked up automatically. Ranges are datacenters outside
-# Google's list: Blizzard-owned blocks, and AWS me-south-1 for Bahrain.
+# Google's list: Blizzard-owned blocks, AWS me-south-1 for Bahrain, and Blizzard's per-city edge /24s in
+# 137.221.64.0/18 (AS57976). Game traffic is relayed through the edge nearest the server (UDP 29503,
+# e.g. a Sydney match goes via ec02-eqsy4 = 137.221.85.x), so a lock must block those too. Only the
+# site /24s are listed: other addresses in that block carry Battle.net services (TCP 443).
 # Google regions that match no entry (India, Canada, Mexico, Africa, ...) are never blocked.
 $Regions = [ordered]@{
     'Singapore'   = @{ Gcp = '^asia-southeast';      Ranges = @() }
-    'Japan'       = @{ Gcp = '^asia-northeast[12]$'; Ranges = @() }
-    'South Korea' = @{ Gcp = '^asia-northeast3$';    Ranges = '121.254.0.0/16', '117.52.0.0/16', '202.9.66.0/23', '110.45.208.0/24', '182.162.31.0/24' }
-    'Taiwan'      = @{ Gcp = '^asia-east';           Ranges = '5.42.160.0/22', '5.42.164.0/22' }
-    'Australia'   = @{ Gcp = '^australia-';          Ranges = '158.115.196.0/23', '37.244.42.0/24' }
-    'NA West'     = @{ Gcp = '^us-west';             Ranges = '64.224.24.0/23', '24.105.8.0/21' }
-    'NA Central'  = @{ Gcp = '^us-central';          Ranges = '64.224.0.0/21', '24.105.40.0/21' }
-    'NA East'     = @{ Gcp = '^us-east';             Ranges = @() }
+    'Japan'       = @{ Gcp = '^asia-northeast[12]$'; Ranges = '137.221.81.0/24' }                       # eqty2 Tokyo
+    'South Korea' = @{ Gcp = '^asia-northeast3$';    Ranges = '121.254.0.0/16', '117.52.0.0/16', '202.9.66.0/23', '110.45.208.0/24', '182.162.31.0/24',
+                                                             '137.221.84.0/24' }                       # lgpy1 Seoul
+    'Taiwan'      = @{ Gcp = '^asia-east';           Ranges = '5.42.160.0/22', '5.42.164.0/22', '137.221.112.0/24' }   # citw1 Taipei
+    'Australia'   = @{ Gcp = '^australia-';          Ranges = '158.115.196.0/23', '37.244.42.0/24', '137.221.85.0/24' } # eqsy4 Sydney
+    'NA West'     = @{ Gcp = '^us-west';             Ranges = '64.224.24.0/23', '24.105.8.0/21',
+                                                             # eqla1 LA, eqsv5 Silicon Valley, eqse2 Seattle, swlv10 Las Vegas, csla1 LA
+                                                             '137.221.68.0/24', '137.221.70.0/24', '137.221.73.0/24', '137.221.83.0/24', '137.221.89.0/24' }
+    'NA Central'  = @{ Gcp = '^us-central';          Ranges = '64.224.0.0/21', '24.105.40.0/21',
+                                                             '137.221.69.0/24', '137.221.74.0/24' }    # eqch2 Chicago, eqda6 Dallas
+    'NA East'     = @{ Gcp = '^us-east';             Ranges = # eqny8/eqny5 New York, eqdc2 DC, eqat2 Atlanta, eqmi2 Miami, eqtr2 Toronto
+                                                             '137.221.71.0/24', '137.221.111.0/24', '137.221.72.0/24', '137.221.75.0/24',
+                                                             '137.221.76.0/24', '137.221.95.0/24' }
     'Brazil'      = @{ Gcp = '^southamerica-';       Ranges = @() }
-    'Europe'      = @{ Gcp = '^europe-';             Ranges = '64.224.26.0/23', '5.42.168.0/21' }
+    'Europe'      = @{ Gcp = '^europe-';             Ranges = '64.224.26.0/23', '5.42.168.0/21',
+                                                             # eqpa4 Paris, eqam1 Amsterdam, eqld5 London, eqfr5 Frankfurt, eqml2 Milan, eqsk1 Stockholm, eqmd2 Madrid
+                                                             '137.221.77.0/24', '137.221.78.0/24', '137.221.79.0/24', '137.221.80.0/24',
+                                                             '137.221.82.0/24', '137.221.86.0/24', '137.221.88.0/24' }
     'Middle East' = @{ Gcp = '^me-';                 Ranges = '157.175.0.0/16', '15.184.0.0/15', '16.24.0.0/16' }
 }
 

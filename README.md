@@ -47,7 +47,9 @@ above), refreshed every 10 seconds.
 1. Most Overwatch 2 servers run on Google Cloud. Their addresses come from Google's own published
    list ([cloud.json](https://www.gstatic.com/ipranges/cloud.json)), grouped by cloud region, so they are
    exact and current. Blizzard-owned datacenters (Korea, Taiwan, Sydney, Las Vegas, Chicago, Amsterdam)
-   use fixed ranges. The list is downloaded once and cached; **Update IP lists** re-downloads it only
+   use fixed ranges. Blizzard also relays game traffic through its own per-city edge points
+   (`137.221.x.0/24`, e.g. a Sydney match runs through Equinix Sydney), so each region includes its
+   edge sites as well. The list is downloaded once and cached; **Update IP lists** re-downloads it only
    when Google has published a new version (one request), then re-applies the lock if it is on.
 2. Subtracts the ranges of the region you keep, plus the Battle.net login and patch endpoints
    (resolved via DNS at lock time) so sign-in keeps working.
